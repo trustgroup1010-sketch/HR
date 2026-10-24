@@ -23,3 +23,26 @@ label{display:flex;flex-direction:column;gap:4px;font-size:13px;color:var(--mut)
 .stat b{display:block;font-size:20px}
 .net{color:var(--ok)}.neg{color:var(--bad)}
 h3{margin:0 0 10px}
+
+/* تحسينات الموبايل */
+body{-webkit-tap-highlight-color:transparent;overscroll-behavior-y:contain}
+input,select{font-size:16px}
+.btn,nav button{min-height:42px}
+header{position:sticky;top:0;z-index:5;padding-top:calc(12px + env(safe-area-inset-top,0px))}
+.wrap{padding-bottom:calc(24px + env(safe-area-inset-bottom,0px))}
+@media(max-width:600px){.wrap{padding:8px}.card{padding:10px}nav button{flex:1 1 auto}}
+
+/* الطباعة / PDF */
+.onlyprint{display:none}
+@page{size:A4 landscape;margin:10mm}
+@media print{
+  :root{--bg:#fff;--card:#fff;--txt:#000;--mut:#444;--bd:#999}
+  header,nav,.noprint,#pwb,#out{display:none!important}
+  .onlyprint{display:inline!important}
+  body{background:#fff;color:#000}
+  .wrap{max-width:none;padding:0}
+  .card{border:none;padding:0;margin:0 0 10px}
+  .tw{overflow:visible}
+  table{font-size:11px}
+  th,td{border:1px solid #999;padding:4px;white-space:normal}
+}

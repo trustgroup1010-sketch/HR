@@ -1,5 +1,5 @@
 import {initializeApp} from "https://www.gstatic.com/firebasejs/10.12.0/firebase-app.js";
-import {getAuth,signInWithEmailAndPassword,signOut,onAuthStateChanged,createUserWithEmailAndPassword} from "https://www.gstatic.com/firebasejs/10.12.0/firebase-auth.js";
+import {getAuth,signInWithEmailAndPassword,signOut,onAuthStateChanged,createUserWithEmailAndPassword,reauthenticateWithCredential,EmailAuthProvider,updatePassword} from "https://www.gstatic.com/firebasejs/10.12.0/firebase-auth.js";
 import {getFirestore,doc,getDoc,setDoc,updateDoc,collection,getDocs,query,where,addDoc,deleteDoc} from "https://www.gstatic.com/firebasejs/10.12.0/firebase-firestore.js";
 import {firebaseConfig,DOMAIN} from "./firebase-config.js";
 
@@ -7,15 +7,17 @@ const fb = initializeApp(firebaseConfig);
 const auth = getAuth(fb), db = getFirestore(fb);
 const $ = s => document.querySelector(s);
 const app = $("#app");
+document.head.insertAdjacentHTML("beforeend", `<style>.onlyprint{display:none}@media print{header,nav,.noprint,button{display:none!important}.onlyprint{display:inline!important}body{background:#fff;color:#000}.card{border:0;padding:0;margin-bottom:8px}.tw{overflow:visible}table{font-size:12px}th,td{border:1px solid #999;white-space:normal;color:#000}@page{size:landscape;margin:10mm}}</style>`);
 const esc = s => String(s ?? "").replace(/[&<>"]/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
 const money = n => (Math.round(n * 100) / 100).toLocaleString("ar-EG");
 const today = () => { const d = new Date(); return new Date(d - d.getTimezoneOffset() * 60000).toISOString().slice(0, 10); };
 const tm = t => { const [h, m] = t.split(":"); return +h * 60 + +m; };
 const nowT = () => new Date().toTimeString().slice(0, 5);
+const addMonth = (m, n) => { const [y, mo] = m.split("-").map(Number), d = new Date(y, mo - 1 + n, 1); return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`; };
 const email = u => u.includes("@") ? u.trim().toLowerCase() : `${u.trim().toLowerCase()}@${DOMAIN}`;
 const TYPE = {daily: "باليومية", monthly: "بالشهر"};
 const ST = {present: "حاضر", absent: "غائب", leave: "إجازة"};
-const KIND = {deduction: "خصم", bonus: "مكافأة", advance: "سلفة", paid: "صرف من المرتب"};
+const KIND = {deduction: "خصم", bonus: "مكافأة", advance: "سلفة", paid: "صرف من المرتب", carry_in: "سلفة مرحّلة من الشهر السابق", carry_out: "سلفة مرحّلة للشهر التالي"};
 let me = null, emps = [], tab = "home", S = {start: "09:00", end: "18:00"};
 let editUid = null;
 const shours = () => (tm(S.end) - tm(S.start)) / 60;
@@ -36,8 +38,9 @@ function calc(e, atts, adjs) {
   const otPay = ot * otRate;
   const ded = adjs.filter(a => a.kind === "deduction").reduce((s, a) => s + a.amount, 0);
   const bonus = adjs.filter(a => a.kind === "bonus").reduce((s, a) => s + a.amount, 0);
-  const adv = adjs.filter(a => a.kind === "advance" || a.kind === "paid").reduce((s, a) => s + a.amount, 0);
-  return {present, absent, ot, base, absentDed, otPay, ded, bonus, adv, lateH, lateDed, net: base - absentDed - lateDed + otPay + bonus - ded - adv};
+  const adv = adjs.filter(a => ["advance", "paid", "carry_in"].includes(a.kind)).reduce((s, a) => s + a.amount, 0);
+  const carryOut = adjs.filter(a => a.kind === "carry_out").reduce((s, a) => s + a.amount, 0);
+  return {present, absent, ot, base, absentDed, otPay, ded, bonus, adv, carryOut, lateH, lateDed, net: base - absentDed - lateDed + otPay + bonus - ded - adv + carryOut};
 }
 
 // ---------- الدخول ----------
@@ -48,7 +51,11 @@ function loginView(msg = "") {
     <div class="neg">${esc(msg)}</div><button class="btn pri">دخول</button></form></div>`;
   $("#lf").onsubmit = async ev => {
     ev.preventDefault();
-    try { await signInWithEmailAndPassword(auth, email($("#u").value), $("#p").value); }
+    try {
+      const un = $("#u").value.trim().toLowerCase(); let em = email(un);
+      if (!un.includes("@")) { try { const l = await getDoc(doc(db, "logins", un)); if (l.exists()) em = l.data().email; } catch {} }
+      await signInWithEmailAndPassword(auth, em, $("#p").value);
+    }
     catch (e) { loginView("بيانات الدخول غير صحيحة (" + (e.code || e.message) + ")"); }
   };
 }
@@ -68,9 +75,10 @@ onAuthStateChanged(auth, async u => {
 });
 
 const shell = (body, nav = "") => {
-  app.innerHTML = `<header><b>👤 ${esc(me.name)}</b><button class="btn" id="out">خروج</button></header>
+  app.innerHTML = `<header><b>👤 ${esc(me.name)}</b><span><button class="btn" id="pwb">🔑 كلمة المرور</button> <button class="btn" id="out">خروج</button></span></header>
   <div class="wrap">${nav}<div id="main">${body}</div></div>`;
   $("#out").onclick = () => signOut(auth);
+  $("#pwb").onclick = pwDialog;
 };
 
 // ---------- الأدمن ----------
@@ -84,6 +92,48 @@ async function adminView() {
   shell("", `<nav>${Object.entries(tabs).map(([k, v]) => `<button data-t="${k}" class="${k === tab ? "on" : ""}">${v}</button>`).join("")}</nav>`);
   document.querySelectorAll("nav button").forEach(b => b.onclick = () => { tab = b.dataset.t; adminView(); });
   ({home: homeTab, emps: empsTab, att: attTab, pay: payTab})[tab]();
+}
+
+function pwDialog() {
+  const d = document.createElement("dialog");
+  d.style.cssText = "border:1px solid var(--bd);border-radius:12px;background:var(--card);color:var(--txt);padding:16px";
+  d.innerHTML = `<form id="pf" style="display:flex;flex-direction:column;gap:8px;min-width:240px"><h3>تغيير كلمة المرور</h3>
+    <label>الحالية<input id="p0" type="password" required autocomplete="current-password"></label>
+    <label>الجديدة (6 أحرف على الأقل)<input id="p1" type="password" minlength="6" required autocomplete="new-password"></label>
+    <div id="pe" class="neg"></div><button class="btn pri">حفظ</button><button type="button" class="btn" id="px">إلغاء</button></form>`;
+  document.body.appendChild(d); d.showModal();
+  const close = () => { d.close(); d.remove(); };
+  d.querySelector("#px").onclick = close;
+  d.querySelector("#pf").onsubmit = async ev => {
+    ev.preventDefault();
+    try {
+      const u = auth.currentUser;
+      await reauthenticateWithCredential(u, EmailAuthProvider.credential(u.email, d.querySelector("#p0").value));
+      await updatePassword(u, d.querySelector("#p1").value);
+      close(); alert("تم تغيير كلمة المرور");
+    } catch (e) { d.querySelector("#pe").textContent = ["auth/invalid-credential", "auth/wrong-password"].includes(e.code) ? "كلمة المرور الحالية غير صحيحة" : (e.code || e.message); }
+  };
+}
+
+// إعادة ضبط باسورد موظف بواسطة المدير: حساب دخول جديد + نقل كل بياناته، واسم المستخدم يفضل زي ما هو
+async function resetEmp(e) {
+  const pw = prompt(`كلمة المرور الجديدة لـ ${e.name} (6 أحرف على الأقل)`);
+  if (!pw) return;
+  if (pw.length < 6) return alert("لازم 6 أحرف على الأقل");
+  try {
+    const newEmail = `${e.username}.${Date.now().toString(36)}@${DOMAIN}`;
+    const cred = await createUserWithEmailAndPassword(getAuth(initializeApp(firebaseConfig, "sec" + Date.now())), newEmail, pw);
+    const nu = cred.user.uid, {uid, ...data} = e;
+    await setDoc(doc(db, "users", nu), data);
+    await setDoc(doc(db, "logins", e.username), {email: newEmail});
+    const as = await getDocs(query(collection(db, "attendance"), where("uid", "==", uid)));
+    for (const d of as.docs) { const a = d.data(); await setDoc(doc(db, "attendance", nu + "_" + a.date), {...a, uid: nu}); await deleteDoc(doc(db, "attendance", d.id)); }
+    const js = await getDocs(query(collection(db, "adjustments"), where("uid", "==", uid)));
+    for (const d of js.docs) await updateDoc(doc(db, "adjustments", d.id), {uid: nu});
+    await deleteDoc(doc(db, "users", uid));
+    alert(`تم. ${e.name} يدخل باسم المستخدم "${e.username}" وكلمة المرور الجديدة.`);
+    adminView();
+  } catch (err) { alert("فشلت العملية: " + (err.code || err.message)); }
 }
 
 async function homeTab() {
@@ -128,7 +178,7 @@ function empsTab() {
     <button class="btn pri">إنشاء</button></form><div id="msg" class="neg"></div></div>
     <div class="card tw"><table><tr><th>الاسم</th><th>المستخدم</th><th>النوع</th><th>الأجر</th><th>سعر الإضافي</th><th>الحالة</th><th></th></tr>
     ${emps.map(e => `<tr><td>${esc(e.name)}</td><td>${esc(e.username)}</td><td>${TYPE[e.type]}</td><td>${money(e.rate)}</td><td>${e.otRate ? money(e.otRate) : "تلقائي"}</td>
-    <td>${e.active === false ? "موقوف" : "نشط"}</td><td><button class="btn" data-a="edit" data-id="${e.uid}">تعديل</button>
+    <td>${e.active === false ? "موقوف" : "نشط"}</td><td><button class="btn" data-a="edit" data-id="${e.uid}">تعديل</button> <button class="btn" data-a="pw" data-id="${e.uid}">🔑 كلمة المرور</button>
     <button class="btn" data-a="tog" data-id="${e.uid}">${e.active === false ? "تفعيل" : "إيقاف"}</button></td></tr>`).join("")}</table></div>`;
   $("#ss").onclick = async () => { S = {start: $("#s1").value, end: $("#s2").value}; await setDoc(doc(db, "settings", "main"), S); alert("تم الحفظ"); };
   if ($("#ef")) {
@@ -154,6 +204,7 @@ function empsTab() {
     const b = ev.target.closest("button[data-a]"); if (!b) return;
     const e = emps.find(x => x.uid === b.dataset.id);
     if (b.dataset.a === "tog") await updateDoc(doc(db, "users", e.uid), {active: e.active === false});
+    else if (b.dataset.a === "pw") { await resetEmp(e); return; }
     else { editUid = e.uid; empsTab(); window.scrollTo(0, 0); return; }
     adminView();
   };
@@ -259,32 +310,64 @@ async function attTab() {
 
 async function payTab() {
   const m0 = today().slice(0, 7);
-  $("#main").innerHTML = `<div class="card"><label style="max-width:200px">الشهر<input type="month" id="m" value="${m0}"></label></div><div id="rep"></div>`;
+  let sheet = null;
+  $("#main").innerHTML = `<div class="card noprint"><div class="grid"><label>الشهر<input type="month" id="m" value="${m0}"></label><button class="btn" id="prn">🖨️ طباعة / PDF</button><button class="btn" id="xls">📊 تصدير Excel</button></div></div><div id="rep"></div>`;
   const load = async () => {
     const m = $("#m").value;
     const [as, js] = await Promise.all([getDocs(query(collection(db, "attendance"), where("month", "==", m))), getDocs(query(collection(db, "adjustments"), where("month", "==", m)))]);
     const atts = as.docs.map(d => d.data()), adjs = js.docs.map(d => ({id: d.id, ...d.data()}));
+    sheet = {m, list: emps.map(e => ({e, c: calc(e, atts.filter(a => a.uid === e.uid), adjs.filter(a => a.uid === e.uid))}))};
     let total = 0;
     const rows = emps.map(e => { const c = calc(e, atts.filter(a => a.uid === e.uid), adjs.filter(a => a.uid === e.uid)); total += c.net;
       return `<tr><td>${esc(e.name)}</td><td>${TYPE[e.type]}</td><td>${c.present}</td><td>${c.absent}</td><td>${c.ot}</td><td>${money(c.base)}</td>
       <td class="neg">${money(c.absentDed)}</td><td class="neg">${money(c.lateDed)}</td><td>${money(c.otPay)}</td><td>${money(c.bonus)}</td><td class="neg">${money(c.ded)}</td><td class="neg">${money(c.adv)}</td><td class="${c.net < 0 ? "neg" : "net"}"><b>${money(c.net)}</b></td></tr>`; }).join("");
-    $("#rep").innerHTML = `<div class="card tw"><h3>كشف المرتبات</h3><table><tr><th>الموظف</th><th>النوع</th><th>حضور</th><th>غياب</th><th>س. إضافي</th><th>الأساسي</th><th>خصم غياب</th><th>خصم تأخير</th><th>قيمة الإضافي</th><th>مكافآت</th><th>خصومات</th><th>سلف / مسحوبات</th><th>الصافي</th></tr>${rows}
+    $("#rep").innerHTML = `<div class="card tw"><h3>كشف المرتبات <span class="onlyprint">— شهر ${m}</span></h3><table><tr><th>الموظف</th><th>النوع</th><th>حضور</th><th>غياب</th><th>س. إضافي</th><th>الأساسي</th><th>خصم غياب</th><th>خصم تأخير</th><th>قيمة الإضافي</th><th>مكافآت</th><th>خصومات</th><th>سلف / مسحوبات</th><th>الصافي</th></tr>${rows}
       <tr><td colspan="12"><b>الإجمالي</b></td><td class="net"><b>${money(total)}</b></td></tr></table></div>
-      <div class="card"><h3>إضافة خصم / مكافأة / سلفة / صرف مرتب</h3><form id="af" class="grid"><label>الموظف<select id="ae">${emps.map(e => `<option value="${e.uid}">${esc(e.name)}</option>`).join("")}</select></label>
+      <div class="card noprint"><button class="btn" id="carry">↪️ ترحيل السلف الزايدة للشهر التالي</button><br><small style="color:var(--mut)">لو صافي موظف بالسالب (السلف أكتر من مستحقه)، الفرق بيتحوّل للشهر اللي بعده، وصافي الشهر ده بيبقى صفر. ممكن تضغط تاني بعد أي تعديل.</small></div>
+      <div class="card noprint"><h3>إضافة خصم / مكافأة / سلفة / صرف مرتب</h3><form id="af" class="grid"><label>الموظف<select id="ae">${emps.map(e => `<option value="${e.uid}">${esc(e.name)}</option>`).join("")}</select></label>
       <label>النوع<select id="ak"><option value="deduction">خصم</option><option value="bonus">مكافأة</option><option value="advance">سلفة</option><option value="paid">صرف من المرتب</option></select></label>
       <label>المبلغ<input id="aa" type="number" min="0" step="any" required></label><label>السبب<input id="ar"></label><button class="btn pri">إضافة</button></form></div>
       <div class="card tw"><table><tr><th>الموظف</th><th>النوع</th><th>المبلغ</th><th>السبب</th><th></th></tr>${adjs.map(a => `<tr><td>${esc((emps.find(e => e.uid === a.uid) || {}).name)}</td>
       <td>${KIND[a.kind] || a.kind}</td><td>${money(a.amount)}</td><td>${esc(a.reason)}</td><td><button class="btn bad" data-del="${a.id}">حذف</button></td></tr>`).join("")}</table></div>`;
     $("#af").onsubmit = async ev => { ev.preventDefault();
       await addDoc(collection(db, "adjustments"), {uid: $("#ae").value, month: m, kind: $("#ak").value, amount: +$("#aa").value, reason: $("#ar").value}); load(); };
-    $("#rep").onclick = async ev => { const b = ev.target.closest("[data-del]"); if (b && confirm("حذف؟")) { await deleteDoc(doc(db, "adjustments", b.dataset.del)); load(); } };
+    $("#prn").onclick = () => window.print();
+    $("#xls").onclick = () => {
+      if (!sheet) return;
+      const head = ["الموظف", "النوع", "أيام الحضور", "أيام الغياب", "ساعات الإضافي", "الأساسي", "خصم غياب", "خصم تأخير", "قيمة الإضافي", "مكافآت", "خصومات", "سلف ومسحوبات", "الصافي"];
+      const r2 = n => Math.round(n * 100) / 100;
+      const rows = sheet.list.map(({e, c}) => [e.name, TYPE[e.type], c.present, c.absent, c.ot, r2(c.base), r2(c.absentDed), r2(c.lateDed), r2(c.otPay), r2(c.bonus), r2(c.ded), r2(c.adv), r2(c.net)]);
+      const tot = ["الإجمالي", "", "", "", "", ...[5, 6, 7, 8, 9, 10, 11, 12].map(i => r2(rows.reduce((t, r) => t + r[i], 0)))];
+      const q = v => typeof v === "number" ? v : `"${String(v).replace(/"/g, '""')}"`;
+      const text = "\ufeff" + [head, ...rows, tot].map(r => r.map(q).join(",")).join("\r\n");
+      const a = document.createElement("a"); a.href = URL.createObjectURL(new Blob([text], {type: "text/csv;charset=utf-8"})); a.download = `مرتبات-${sheet.m}.csv`; a.click();
+    };
+    $("#carry").onclick = async () => {
+      const nm = addMonth(m, 1); let n = 0;
+      try {
+        for (const {e, c} of sheet.list) {
+          const x = Math.max(0, -(c.net - c.carryOut)), co = `co_${e.uid}_${m}`, ci = `ci_${e.uid}_${nm}`;
+          if (x > 0) { n++;
+            await setDoc(doc(db, "adjustments", co), {uid: e.uid, month: m, kind: "carry_out", amount: x, reason: "ترحيل للشهر التالي"});
+            await setDoc(doc(db, "adjustments", ci), {uid: e.uid, month: nm, kind: "carry_in", amount: x, reason: "مرحّل من شهر " + m}); }
+          else { await deleteDoc(doc(db, "adjustments", co)); await deleteDoc(doc(db, "adjustments", ci)); }
+        }
+        alert(n ? `تم ترحيل سلف ${n} موظف للشهر التالي` : "مفيش موظف صافيه بالسالب، مفيش حاجة تترحّل");
+      } catch (err) { alert("فشل الترحيل: " + (err.code || err.message)); }
+      load();
+    };
+    $("#rep").onclick = async ev => { const b = ev.target.closest("[data-del]"); if (b && confirm("حذف؟")) {
+      const id = b.dataset.del, mt = id.match(/^(co|ci)_(.+)_(\d{4}-\d{2})$/);
+      await deleteDoc(doc(db, "adjustments", id));
+      if (mt) await deleteDoc(doc(db, "adjustments", `${mt[1] === "co" ? "ci" : "co"}_${mt[2]}_${addMonth(mt[3], mt[1] === "co" ? 1 : -1)}`));
+      load(); } };
   };
   $("#m").onchange = load; load();
 }
 
 // ---------- الموظف ----------
 async function empView() {
-  shell(`<div class="card" style="text-align:center"><h3>كود الحضور الخاص بك</h3><div id="qr" style="display:inline-block;background:#fff;padding:10px;border-radius:8px"></div><div style="margin-top:8px">ميعاد الحضور <b>${S.start}</b> — الانصراف <b>${S.end}</b></div></div><div class="card"><label style="max-width:200px">الشهر<input type="month" id="m" value="${today().slice(0, 7)}"></label></div><div id="rep"></div>`);
+  shell(`<div class="card noprint" style="text-align:center"><h3>كود الحضور الخاص بك</h3><div id="qr" style="display:inline-block;background:#fff;padding:10px;border-radius:8px"></div><div style="margin-top:8px">ميعاد الحضور <b>${S.start}</b> — الانصراف <b>${S.end}</b></div></div><div class="card"><label style="max-width:200px">الشهر<input type="month" id="m" value="${today().slice(0, 7)}"></label> <button class="btn noprint" onclick="window.print()">🖨️ طباعة / PDF</button></div><div id="rep"></div>`);
   if (window.QRCode) new QRCode($("#qr"), {text: "HR:" + me.uid, width: 180, height: 180}); else $("#qr").textContent = "HR:" + me.uid;
   const load = async () => {
     const m = $("#m").value;
@@ -293,7 +376,7 @@ async function empView() {
       getDocs(query(collection(db, "adjustments"), where("uid", "==", me.uid), where("month", "==", m)))]);
     const atts = as.docs.map(d => d.data()).sort((a, b) => a.date.localeCompare(b.date)), adjs = js.docs.map(d => d.data());
     const c = calc(me, atts, adjs);
-    $("#rep").innerHTML = `<div class="card"><h3>ملخص الشهر (${TYPE[me.type]})</h3><div class="stats">
+    $("#rep").innerHTML = `<div class="card"><h3>ملخص الشهر — ${esc(me.name)} (${TYPE[me.type]})</h3><div class="stats">
       <div class="stat"><b>${c.present}</b>حضور</div><div class="stat"><b>${c.absent}</b>غياب</div><div class="stat"><b>${c.ot}</b>ساعات إضافية</div>
       <div class="stat"><b>${money(c.base)}</b>الأساسي</div><div class="stat"><b>${money(c.otPay)}</b>الإضافي</div>
       <div class="stat"><b class="neg">${money(c.ded + c.absentDed + c.lateDed)}</b>إجمالي الخصومات</div><div class="stat"><b>${money(c.bonus)}</b>مكافآت</div><div class="stat"><b class="neg">${money(c.adv)}</b>سلف / مسحوبات</div>
