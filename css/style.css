@@ -46,3 +46,8 @@ header{position:sticky;top:0;z-index:5;padding-top:calc(12px + env(safe-area-ins
   table{font-size:11px}
   th,td{border:1px solid #999;padding:4px;white-space:normal}
 }
+
+/* الفوتر */
+body{min-height:100vh;display:flex;flex-direction:column}
+#app{flex:1}
+.foot{text-align:center;color:var(--mut);font-size:12px;padding:16px 8px calc(16px + env(safe-area-inset-bottom,0px))}

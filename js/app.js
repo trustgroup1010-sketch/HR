@@ -12,6 +12,9 @@ const esc = s => String(s ?? "").replace(/[&<>"]/g, c => ({"&":"&amp;","<":"&lt;
 const money = n => (Math.round(n * 100) / 100).toLocaleString("ar-EG");
 const today = () => { const d = new Date(); return new Date(d - d.getTimezoneOffset() * 60000).toISOString().slice(0, 10); };
 const tm = t => { const [h, m] = t.split(":"); return +h * 60 + +m; };
+const hm = n => String(Math.floor(n / 60)).padStart(2, "0") + ":" + String(n % 60).padStart(2, "0");
+const byNew = (a, b) => (b.ts || 0) - (a.ts || 0);
+const dt = a => a.ts ? new Date(a.ts).toLocaleString("ar-EG", {dateStyle: "short", timeStyle: "short"}) : "—";
 const nowT = () => new Date().toTimeString().slice(0, 5);
 const addMonth = (m, n) => { const [y, mo] = m.split("-").map(Number), d = new Date(y, mo - 1 + n, 1); return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`; };
 const email = u => u.includes("@") ? u.trim().toLowerCase() : `${u.trim().toLowerCase()}@${DOMAIN}`;
@@ -20,7 +23,11 @@ const ST = {present: "حاضر", absent: "غائب", leave: "إجازة"};
 const KIND = {deduction: "خصم", bonus: "مكافأة", advance: "سلفة", paid: "صرف من المرتب", carry_in: "سلفة مرحّلة من الشهر السابق", carry_out: "سلفة مرحّلة للشهر التالي"};
 let me = null, emps = [], tab = "home", S = {start: "09:00", end: "18:00"};
 let editUid = null;
-const shours = () => (tm(S.end) - tm(S.start)) / 60;
+const shours = () => S.hours || (tm(S.end) - tm(S.start)) / 60;
+// التأخير لحد "بداية الخصم" بدون خصم، وبعدها ساعة عن كل ساعة تأخير (أو جزء منها)
+const grace = () => S.deductFrom ? Math.max(0, tm(S.deductFrom) - tm(S.start)) : 60;
+const lateDedH = l => l > grace() ? Math.ceil((l - grace()) / 60) : 0;
+const otHours = out => { const o = tm(out) - tm(S.end); return o > 0 ? Math.floor(o / 15) / 4 : 0; };
 
 // ---------- حساب المرتب ----------
 function calc(e, atts, adjs) {
@@ -32,7 +39,7 @@ function calc(e, atts, adjs) {
   const absentDed = daily ? 0 : (e.rate / 30) * absent;
   const hourly = (daily ? e.rate : e.rate / 30) / shours();
   // أول ساعة تأخير بدون خصم، ومن الساعة الثانية يُخصم ساعة عن كل ساعة تأخير
-  const lateH = atts.reduce((t, a) => { const l = a.in ? tm(a.in) - tm(S.start) : 0; return t + (l > 60 ? Math.ceil((l - 60) / 60) : 0); }, 0);
+  const lateH = atts.reduce((t, a) => { const l = a.in ? tm(a.in) - tm(S.start) : 0; return t + lateDedH(l); }, 0);
   const lateDed = lateH * hourly;
   const otRate = e.otRate || hourly * 1.5;
   const otPay = ot * otRate;
@@ -168,7 +175,7 @@ function editCard() {
 }
 
 function empsTab() {
-  $("#main").innerHTML = `${editCard()}<div class="card"><h3>مواعيد العمل</h3><div class="grid"><label>بداية الدوام<input type="time" id="s1" value="${S.start}"></label><label>نهاية الدوام<input type="time" id="s2" value="${S.end}"></label><button class="btn pri" id="ss">حفظ</button></div><small>أول ساعة تأخير بدون خصم، ومن الساعة الثانية يُخصم ساعة عن كل ساعة تأخير بسعر ساعة الموظف.</small></div><div class="card"><h3>إضافة موظف وإنشاء حساب</h3><form id="nf" class="grid">
+  $("#main").innerHTML = `${editCard()}<div class="card"><h3>مواعيد العمل</h3><div class="grid"><label>بداية الدوام<input type="time" id="s1" value="${S.start}"></label><label>نهاية الدوام<input type="time" id="s2" value="${S.end}"></label><label>بداية الخصم (لحد الوقت ده بدون خصم)<input type="time" id="s3" value="${hm(tm(S.start) + grace())}"></label><label>ساعات العمل (لحساب سعر الساعة)<input type="number" id="s4" min="1" step="0.25" value="${shours()}"></label><button class="btn pri" id="ss">حفظ</button></div><small>التأخير لحد "بداية الخصم" بدون خصم، وبعده يُخصم ساعة عن كل ساعة تأخير (أو جزء منها) بسعر ساعة الموظف. الإضافي بيتحسب تلقائي بعد نهاية الدوام. تقدر تغيّر أي حاجة في أي وقت، والتغيير بيسري على الحسابات كلها.</small></div><div class="card"><h3>إضافة موظف وإنشاء حساب</h3><form id="nf" class="grid">
     <label>الاسم<input id="n" required></label>
     <label>اسم المستخدم<input id="un" required pattern="[A-Za-z0-9._-]+" title="حروف إنجليزي وأرقام فقط"></label>
     <label>كلمة المرور<input id="pw" required minlength="6"></label>
@@ -180,7 +187,14 @@ function empsTab() {
     ${emps.map(e => `<tr><td>${esc(e.name)}</td><td>${esc(e.username)}</td><td>${TYPE[e.type]}</td><td>${money(e.rate)}</td><td>${e.otRate ? money(e.otRate) : "تلقائي"}</td>
     <td>${e.active === false ? "موقوف" : "نشط"}</td><td><button class="btn" data-a="edit" data-id="${e.uid}">تعديل</button> <button class="btn" data-a="pw" data-id="${e.uid}">🔑 كلمة المرور</button>
     <button class="btn" data-a="tog" data-id="${e.uid}">${e.active === false ? "تفعيل" : "إيقاف"}</button></td></tr>`).join("")}</table></div>`;
-  $("#ss").onclick = async () => { S = {start: $("#s1").value, end: $("#s2").value}; await setDoc(doc(db, "settings", "main"), S); alert("تم الحفظ"); };
+  $("#ss").onclick = async () => {
+    const a = $("#s1").value, b = $("#s2").value, c = $("#s3").value, h = +$("#s4").value;
+    if (!a || !b || !c || !h) return alert("املا كل الخانات");
+    if (tm(b) <= tm(a)) return alert("نهاية الدوام لازم تكون بعد البداية");
+    if (tm(c) < tm(a)) return alert("بداية الخصم لازم تكون بعد بداية الدوام أو تساويها");
+    S = {start: a, end: b, deductFrom: c, hours: Math.abs(h - (tm(b) - tm(a)) / 60) < 0.01 ? 0 : h};
+    await setDoc(doc(db, "settings", "main"), S); alert("تم الحفظ"); empsTab();
+  };
   if ($("#ef")) {
     $("#ec").onclick = () => { editUid = null; empsTab(); };
     $("#ef").onsubmit = async ev => { ev.preventDefault();
@@ -212,7 +226,7 @@ function empsTab() {
 
 async function attTab() {
   $("#main").innerHTML = `<div class="card"><div class="grid"><label>اليوم<input type="date" id="d" value="${today()}"></label>
-    <div>ميعاد الحضور: <b>${S.start}</b><br>الانصراف: <b>${S.end}</b> (${shours()} ساعات)</div>
+    <div>ميعاد الحضور: <b>${S.start}</b><br>الانصراف: <b>${S.end}</b> (${shours()} ساعات)<br>بداية الخصم: <b>${hm(tm(S.start) + grace())}</b></div>
     </div>
     <div class="grid" style="margin-top:10px"><button class="btn pri" id="sin">📥 تحضير</button><button class="btn pri" id="sout" style="background:#8250df;border-color:#8250df">📤 انصراف</button></div>
     <div id="sc" style="display:none;margin-top:10px"><div id="mode" style="font-weight:700;margin-bottom:6px"></div><video id="vd" playsinline muted style="width:100%;max-width:320px;border-radius:10px"></video><br><button class="btn pri" id="stop" style="margin-top:8px">✅ إنهاء</button></div>
@@ -229,7 +243,7 @@ async function attTab() {
       return `<tr data-id="${e.uid}"><td>${esc(e.name)}</td><td><select class="st"><option value="">—</option>
       ${Object.entries(ST).map(([k, v]) => `<option value="${k}" ${a.status === k ? "selected" : ""}>${v}</option>`).join("")}</select></td>
       <td><input class="in" type="time" value="${a.in || ""}"></td><td><input class="out" type="time" value="${a.out || ""}"></td>
-      <td class="${l > 60 ? "neg" : ""}">${l > 0 ? l + " د" + (l > 60 ? " (خصم)" : "") : "—"}</td>
+      <td class="${lateDedH(l) ? "neg" : ""}">${l > 0 ? l + " د" + (lateDedH(l) ? " (خصم " + lateDedH(l) + " س)" : "") : "—"}</td>
       <td><input class="ot" type="number" min="0" step="0.25" value="${a.ot || 0}" style="width:80px"></td></tr>`; }).join("")}</table>
       <small>التغييرات تُحفظ تلقائياً</small></div>`;
   };
@@ -243,7 +257,7 @@ async function attTab() {
     if (mode === "in") {
       if (a.in) return `⚠️ ${e.name}: اتحضّر قبل كده الساعة ${a.in}`;
       a.in = t; a.status = "present"; const l = tm(t) - tm(S.start);
-      txt = `${e.name}: حضور ${t}` + (l > 60 ? ` — متأخر ${l} د (خصم ${Math.ceil((l - 60) / 60)} ساعة)` : l > 0 ? ` — متأخر ${l} د (ضمن السماح)` : "");
+      txt = `${e.name}: حضور ${t}` + (lateDedH(l) ? ` — متأخر ${l} د (خصم ${lateDedH(l)} ساعة)` : l > 0 ? ` — متأخر ${l} د (ضمن السماح)` : "");
     } else {
       if (!a.in) return `⚠️ ${e.name}: لسه ما اتحضّرش النهارده`;
       if (a.out) return `⚠️ ${e.name}: سجّل انصراف قبل كده الساعة ${a.out}`;
@@ -301,6 +315,8 @@ async function attTab() {
   $("#d").onchange = load; await load();
   $("#main").onchange = async ev => {
     const tr = ev.target.closest("tr[data-id]"); if (!tr) return;
+    if (ev.target.classList.contains("out")) tr.querySelector(".ot").value = ev.target.value ? otHours(ev.target.value) : 0;
+    if (!tr.querySelector(".st").value && (tr.querySelector(".in").value || tr.querySelector(".out").value)) tr.querySelector(".st").value = "present";
     const d = $("#d").value, uid = tr.dataset.id, status = tr.querySelector(".st").value, ot = +tr.querySelector(".ot").value || 0;
     const ref = doc(db, "attendance", uid + "_" + d);
     status ? await setDoc(ref, {uid, date: d, month: d.slice(0, 7), status, ot, in: tr.querySelector(".in").value, out: tr.querySelector(".out").value}) : await deleteDoc(ref);
@@ -327,10 +343,10 @@ async function payTab() {
       <div class="card noprint"><h3>إضافة خصم / مكافأة / سلفة / صرف مرتب</h3><form id="af" class="grid"><label>الموظف<select id="ae">${emps.map(e => `<option value="${e.uid}">${esc(e.name)}</option>`).join("")}</select></label>
       <label>النوع<select id="ak"><option value="deduction">خصم</option><option value="bonus">مكافأة</option><option value="advance">سلفة</option><option value="paid">صرف من المرتب</option></select></label>
       <label>المبلغ<input id="aa" type="number" min="0" step="any" required></label><label>السبب<input id="ar"></label><button class="btn pri">إضافة</button></form></div>
-      <div class="card tw"><table><tr><th>الموظف</th><th>النوع</th><th>المبلغ</th><th>السبب</th><th></th></tr>${adjs.map(a => `<tr><td>${esc((emps.find(e => e.uid === a.uid) || {}).name)}</td>
-      <td>${KIND[a.kind] || a.kind}</td><td>${money(a.amount)}</td><td>${esc(a.reason)}</td><td><button class="btn bad" data-del="${a.id}">حذف</button></td></tr>`).join("")}</table></div>`;
+      <div class="card tw"><table><tr><th>الموظف</th><th>النوع</th><th>المبلغ</th><th>السبب</th><th>التاريخ</th><th></th></tr>${adjs.slice().sort(byNew).map(a => `<tr><td>${esc((emps.find(e => e.uid === a.uid) || {}).name)}</td>
+      <td>${KIND[a.kind] || a.kind}</td><td>${money(a.amount)}</td><td>${esc(a.reason)}</td><td>${dt(a)}</td><td><button class="btn bad" data-del="${a.id}">حذف</button></td></tr>`).join("")}</table></div>`;
     $("#af").onsubmit = async ev => { ev.preventDefault();
-      await addDoc(collection(db, "adjustments"), {uid: $("#ae").value, month: m, kind: $("#ak").value, amount: +$("#aa").value, reason: $("#ar").value}); load(); };
+      await addDoc(collection(db, "adjustments"), {uid: $("#ae").value, month: m, kind: $("#ak").value, amount: +$("#aa").value, reason: $("#ar").value, ts: Date.now()}); load(); };
     $("#prn").onclick = () => window.print();
     $("#xls").onclick = () => {
       if (!sheet) return;
@@ -348,8 +364,8 @@ async function payTab() {
         for (const {e, c} of sheet.list) {
           const x = Math.max(0, -(c.net - c.carryOut)), co = `co_${e.uid}_${m}`, ci = `ci_${e.uid}_${nm}`;
           if (x > 0) { n++;
-            await setDoc(doc(db, "adjustments", co), {uid: e.uid, month: m, kind: "carry_out", amount: x, reason: "ترحيل للشهر التالي"});
-            await setDoc(doc(db, "adjustments", ci), {uid: e.uid, month: nm, kind: "carry_in", amount: x, reason: "مرحّل من شهر " + m}); }
+            await setDoc(doc(db, "adjustments", co), {uid: e.uid, month: m, kind: "carry_out", amount: x, reason: "ترحيل للشهر التالي", ts: Date.now()});
+            await setDoc(doc(db, "adjustments", ci), {uid: e.uid, month: nm, kind: "carry_in", amount: x, reason: "مرحّل من شهر " + m, ts: Date.now()}); }
           else { await deleteDoc(doc(db, "adjustments", co)); await deleteDoc(doc(db, "adjustments", ci)); }
         }
         alert(n ? `تم ترحيل سلف ${n} موظف للشهر التالي` : "مفيش موظف صافيه بالسالب، مفيش حاجة تترحّل");
@@ -367,7 +383,7 @@ async function payTab() {
 
 // ---------- الموظف ----------
 async function empView() {
-  shell(`<div class="card noprint" style="text-align:center"><h3>كود الحضور الخاص بك</h3><div id="qr" style="display:inline-block;background:#fff;padding:10px;border-radius:8px"></div><div style="margin-top:8px">ميعاد الحضور <b>${S.start}</b> — الانصراف <b>${S.end}</b></div></div><div class="card"><label style="max-width:200px">الشهر<input type="month" id="m" value="${today().slice(0, 7)}"></label> <button class="btn noprint" onclick="window.print()">🖨️ طباعة / PDF</button></div><div id="rep"></div>`);
+  shell(`<div class="card noprint" style="text-align:center"><h3>كود الحضور الخاص بك</h3><div id="qr" style="display:inline-block;background:#fff;padding:10px;border-radius:8px"></div><div style="margin-top:8px">ميعاد الحضور <b>${S.start}</b> — الانصراف <b>${S.end}</b> — الخصم بعد <b>${hm(tm(S.start) + grace())}</b></div></div><div class="card"><label style="max-width:200px">الشهر<input type="month" id="m" value="${today().slice(0, 7)}"></label> <button class="btn noprint" onclick="window.print()">🖨️ طباعة / PDF</button></div><div id="rep"></div>`);
   if (window.QRCode) new QRCode($("#qr"), {text: "HR:" + me.uid, width: 180, height: 180}); else $("#qr").textContent = "HR:" + me.uid;
   const load = async () => {
     const m = $("#m").value;
@@ -382,7 +398,7 @@ async function empView() {
       <div class="stat"><b class="neg">${money(c.ded + c.absentDed + c.lateDed)}</b>إجمالي الخصومات</div><div class="stat"><b>${money(c.bonus)}</b>مكافآت</div><div class="stat"><b class="neg">${money(c.adv)}</b>سلف / مسحوبات</div>
       <div class="stat"><b class="net">${money(c.net)}</b>الصافي</div></div></div>
       <div class="card tw"><h3>الحضور</h3><table><tr><th>التاريخ</th><th>الحالة</th><th>حضور</th><th>انصراف</th><th>إضافي</th></tr>${atts.map(a => `<tr><td>${a.date}</td><td>${ST[a.status]}</td><td>${a.in || "—"}</td><td>${a.out || "—"}</td><td>${a.ot || 0}</td></tr>`).join("")}</table></div>
-      <div class="card tw"><h3>الخصومات والمكافآت</h3><table><tr><th>النوع</th><th>المبلغ</th><th>السبب</th></tr>${adjs.map(a => `<tr><td>${KIND[a.kind] || a.kind}</td><td>${money(a.amount)}</td><td>${esc(a.reason)}</td></tr>`).join("")}</table></div>`;
+      <div class="card tw"><h3>الخصومات والمكافآت</h3><table><tr><th>النوع</th><th>المبلغ</th><th>السبب</th><th>التاريخ</th></tr>${adjs.slice().sort(byNew).map(a => `<tr><td>${KIND[a.kind] || a.kind}</td><td>${money(a.amount)}</td><td>${esc(a.reason)}</td><td>${dt(a)}</td></tr>`).join("")}</table></div>`;
   };
   $("#m").onchange = load; load();
 }
